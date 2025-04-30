@@ -86,6 +86,7 @@ def detect(save_img=False):
         # Inference
         t1 = time_synchronized()
         pred = model(img, augment=opt.augment)[0]
+        print(pred.shape)
 
         # Apply NMS
         pred = non_max_suppression(pred, opt.conf_thres, opt.iou_thres, classes=opt.classes, agnostic=opt.agnostic_nms)
@@ -116,17 +117,11 @@ def detect(save_img=False):
                     s += '%g %ss, ' % (n, names[int(c)])  # add to string
 
                 # Write results
-                for *xyxy, conf, depth, cls in det:
-                    if save_txt:  # Write to file
-                        xywh = (xyxy2xywh(torch.tensor(xyxy).view(1, 4)) / gn).view(-1).tolist()  # normalized xywh
-                        with open(txt_path + '.txt', 'a') as f:
-                            f.write(('%g ' * 5 + '\n') % (cls, *xywh))  # label format
+                print(det.shape)
+                for *xyxy, conf, cls, depth in det:
+                  label = f'{names[int(cls)]} {conf:.2f} D:{depth:.2f}m'
+                  plot_one_box(xyxy, im0, label=label, color=colors[int(cls)], line_thickness=3)
 
-                    if save_img or view_img:  # Add bbox to image
-                        # label = '%s %.2f D:%.2fm' % (names[int(cls)], conf, depth)
-                        # plot_one_box(list(xyxy), im0, label=label, color=colors[int(cls)], line_thickness=3)
-                        print(depth)
-                        continue
 
 
             # Print time (inference + NMS)
