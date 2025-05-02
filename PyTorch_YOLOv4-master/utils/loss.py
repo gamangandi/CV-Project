@@ -59,69 +59,64 @@ class FocalLoss(nn.Module):
             return loss
 
 
-def compute_loss(p, targets, model):  # predictions, targets, model
+def compute_loss(p, targets, model):
     device = targets.device
-    #print(device)
-    lcls, lbox, lobj = torch.zeros(1, device=device), torch.zeros(1, device=device), torch.zeros(1, device=device)
-    tcls, tbox, indices, anchors = build_targets(p, targets, model)  # targets
-    h = model.hyp  # hyperparameters
+    lcls, lbox, lobj, ldepth = [torch.zeros(1, device=device) for _ in range(4)]
 
-    # Define criteria
+    tcls, tbox, indices, anchors = build_targets(p, targets, model)
+    h = model.hyp
+
     BCEcls = nn.BCEWithLogitsLoss(pos_weight=torch.Tensor([h['cls_pw']])).to(device)
     BCEobj = nn.BCEWithLogitsLoss(pos_weight=torch.Tensor([h['obj_pw']])).to(device)
 
-    # Class label smoothing https://arxiv.org/pdf/1902.04103.pdf eqn 3
     cp, cn = smooth_BCE(eps=0.0)
-
-    # Focal loss
-    g = h['fl_gamma']  # focal loss gamma
+    g = h.get('fl_gamma', 0.0)
     if g > 0:
         BCEcls, BCEobj = FocalLoss(BCEcls, g), FocalLoss(BCEobj, g)
 
-    # Losses
-    nt = 0  # number of targets
-    no = len(p)  # number of outputs
-    balance = [4.0, 1.0, 0.4] if no == 3 else [4.0, 1.0, 0.4, 0.1]  # P3-5 or P3-6
-    balance = [4.0, 1.0, 0.5, 0.4, 0.1] if no == 5 else balance
-    for i, pi in enumerate(p):  # layer index, layer predictions
-        b, a, gj, gi = indices[i]  # image, anchor, gridy, gridx
-        tobj = torch.zeros_like(pi[..., 0], device=device)  # target obj
+    nt = 0
+    no = len(p)
+    balance = [4.0, 1.0, 0.5, 0.4, 0.1] if no == 5 else [4.0, 1.0, 0.4]
 
-        n = b.shape[0]  # number of targets
+    for i, pi in enumerate(p):
+        b, a, gj, gi = indices[i]
+        tobj = torch.zeros_like(pi[..., 0], device=device)
+
+        n = b.shape[0]
         if n:
-            nt += n  # cumulative targets
-            ps = pi[b, a, gj, gi]  # prediction subset corresponding to targets
+            nt += n
+            ps = pi[b, a, gj, gi]
 
-            # Regression
             pxy = ps[:, :2].sigmoid() * 2. - 0.5
             pwh = (ps[:, 2:4].sigmoid() * 2) ** 2 * anchors[i]
-            pbox = torch.cat((pxy, pwh), 1).to(device)  # predicted box
-            iou = bbox_iou(pbox.T, tbox[i], x1y1x2y2=False, CIoU=True)  # iou(prediction, target)
-            lbox += (1.0 - iou).mean()  # iou loss
+            pbox = torch.cat((pxy, pwh), 1).to(device)
+            iou = bbox_iou(pbox.T, tbox[i], x1y1x2y2=False, CIoU=True)
+            lbox += (1.0 - iou).mean()
 
-            # Objectness
-            tobj[b, a, gj, gi] = (1.0 - model.gr) + model.gr * iou.detach().clamp(0).type(tobj.dtype)  # iou ratio
+            tobj[b, a, gj, gi] = (1.0 - model.gr) + model.gr * iou.detach().clamp(0).type(tobj.dtype)
 
-            # Classification
-            if model.nc > 1:  # cls loss (only if multiple classes)
-                t = torch.full_like(ps[:, 5:], cn, device=device)  # targets
+            if model.nc > 1:
+                t = torch.full_like(ps[:, 5:5+model.nc], cn, device=device)
                 t[range(n), tcls[i]] = cp
-                lcls += BCEcls(ps[:, 5:], t)  # BCE
+                lcls += BCEcls(ps[:, 5:5+model.nc], t)
 
-            # Append targets to text file
-            # with open('targets.txt', 'a') as file:
-            #     [file.write('%11.5g ' * 4 % tuple(x) + '\n') for x in torch.cat((txy[i], twh[i]), 1)]
+            if hasattr(model, 'predicts_depth') and model.predicts_depth:
+                pred_depth = ps[:, -1]  # assumes depth is the last output
+                true_depth = targets[b][:, -1]  # assumes depth in last col of targets
+                ldepth += F.l1_loss(pred_depth, true_depth)
 
-        lobj += BCEobj(pi[..., 4], tobj) * balance[i]  # obj loss
+        lobj += BCEobj(pi[..., 4], tobj) * balance[i]
 
-    s = 3 / no  # output count scaling
+    s = 3 / no
     lbox *= h['box'] * s
     lobj *= h['obj'] * s * (1.4 if no >= 4 else 1.)
     lcls *= h['cls'] * s
-    bs = tobj.shape[0]  # batch size
+    ldepth *= h.get('depth', 1.0) * s
 
-    loss = lbox + lobj + lcls
-    return loss * bs, torch.cat((lbox, lobj, lcls, loss)).detach()
+    bs = tobj.shape[0]
+    loss = lbox + lobj + lcls + ldepth
+    return loss * bs, torch.cat((lbox, lobj, lcls, ldepth, loss)).detach()
+
 
 
 def build_targets(p, targets, model):
